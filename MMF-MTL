@@ -1,0 +1,109 @@
+#调用
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+from tensorflow.keras.applications.resnet50 import ResNet50
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Input, Flatten, concatenate
+from osgeo import gdal
+import cv2
+import warnings
+warnings.filterwarnings("ignore")
+from sklearn.preprocessing import StandardScaler
+scalar = StandardScaler()
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+
+# 设置模型参数
+batch_size = 128
+epochs = 80
+#加载数据
+
+
+#定义模型
+## 加载ResNet50模型，去掉顶层
+resnet_base = ResNet50(weights='imagenet', include_top=False, input_shape=(60, 60, 3))
+
+# 冻结ResNet50的前几层，让后面的层能够针对当前任务进行微调
+from tensorflow.keras.initializers import HeNormal
+for layer in resnet_base.layers:
+    if hasattr(layer, 'kernel_initializer'):
+        layer.kernel_initializer = HeNormal()
+
+for layer in resnet_base.layers[:10]:
+    layer.trainable = False
+
+for layer in resnet_base.layers[10:]:
+    layer.trainable = True
+
+# 在ResNet50的顶层增加自定义的全局平均池化层和全连接层
+from tensorflow.keras.regularizers import l2
+x = resnet_base.output
+x = GlobalAveragePooling2D()(x)
+x = Dense(1024, activation='relu',kernel_regularizer=l2(1.5))(x)
+x = Dense(512, activation='relu',kernel_regularizer=l2(1.5))(x)
+x = Dense(128, activation='relu',kernel_regularizer=l2(1.5))(x)
+
+## 加载全连接网络模型
+model_input = Input(shape=14)
+model_hidden = Dense(64, activation='relu',kernel_regularizer=l2(1.5))(model_input)
+model_hidden = Dense(128, activation='relu',kernel_regularizer=l2(1.5))(model_hidden)
+model_hidden = Dense(128, activation='relu',kernel_regularizer=l2(1.5))(model_hidden)
+
+##将两模型的输出拼接在一起
+combined_model = concatenate([x,model_hidden])
+combined_model = Dense(128, activation='relu',kernel_regularizer=l2(1.5))(combined_model)
+
+##构建多任务回归模型
+lai_output = Dense(1,name='lai_output')(combined_model)
+agb_output = Dense(1,name='agb_output')(combined_model)
+ph_output = Dense(1, name='ph_output')(combined_model)
+lcc_output = Dense(1, name='lcc_output')(combined_model)
+
+# 定义和编译模型
+model = Model(inputs=[resnet_base.input, model_input],
+              outputs=[lai_output, agb_output, ph_output, lcc_output])
+
+initial_learning_rate = 0.0001 #LAI 0.0001
+warmup_epochs = 3
+total_epochs = 80
+steps_per_epoch = 3577 / batch_size  #3577
+warmup_steps = warmup_epochs * steps_per_epoch
+
+def cosine_decay_with_warmup(epoch, lr):
+    if epoch < warmup_epochs:
+        return (initial_learning_rate / warmup_epochs) * (epoch+1)
+    else:
+        progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
+        lr = 0.5 * initial_learning_rate * (1 + np.cos(progress * np.pi))
+        return lr
+
+optimizer = tf.keras.optimizers.Adam(learning_rate=tf.Variable(initial_learning_rate))
+lr_schedule = tf.keras.callbacks.LearningRateScheduler(cosine_decay_with_warmup)
+
+model.compile(optimizer=optimizer, loss='mean_squared_error', metrics=['mse'],loss_weights=[1/12, 1/12, 1/12, 3/4])
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, verbose=1)
+
+history = model.fit(
+    [X_image,X_feture], [y[:, 0],y[:, 1],y[:, 2],y[:, 3]],
+    epochs=total_epochs,
+    batch_size=batch_size,
+    validation_split=0.3,
+    shuffle=True,
+    callbacks=[early_stopping, lr_schedule]
+)
+
+##在测试集上评估模型
+test_loss = model.evaluate([X_image,X_feture], [y[:, 0],y[:, 1],y[:, 2],y[:, 3]])
+print(test_loss)
+
+import matplotlib.pyplot as plt
+
+# 绘制训练集和测试集的loss结果曲线
+plt.plot(history.history['loss'], label='train_loss')
+plt.plot(history.history['val_loss'], label='val_loss')
+plt.title('Training and Validation Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.show()
