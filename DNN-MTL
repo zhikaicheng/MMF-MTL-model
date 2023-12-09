@@ -1,0 +1,60 @@
+
+import tensorflow as tf
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+import warnings
+warnings.filterwarnings("ignore")
+
+
+data = pd.read_excel('G:/dataset/Multimode fusion/CT+CWJ/stage1-5/标签值.xlsx',sheet_name='数据集')
+train_data = data.iloc[:350, :] 
+test_data = data.iloc[350:, :] 
+
+scalar = StandardScaler()
+train_features = train_data.iloc[:, 5:].values
+train_features = scalar.fit_transform(train_features)
+train_labels = train_data.iloc[:, 1:5].values
+test_features = test_data.iloc[:, 5:].values
+test_features = scalar.fit_transform(test_features)
+test_labels = test_data.iloc[:, 1:5].values
+
+def create_model(input_shape):
+    model_input = tf.keras.layers.Input(shape=input_shape)
+
+    # 全连接层1
+    x = tf.keras.layers.Dense(64, activation='relu')(model_input)
+    # 全连接层2
+    x = tf.keras.layers.Dense(128, activation='relu')(x)
+    # 全连接层3
+    x = tf.keras.layers.Dense(128, activation='relu')(x)
+    # 分支1
+    lai_output = tf.keras.layers.Dense(1, name='lai_output')(x)
+    # 分支2
+    agb_output = tf.keras.layers.Dense(1, name='agb_output')(x)
+    # 分支3
+    ph_output = tf.keras.layers.Dense(1, name='ph_output')(x)
+    # 分支4
+    lcc_output = tf.keras.layers.Dense(1, name='lcc_output')(x)
+
+    # 定义模型
+    model = tf.keras.models.Model(inputs=model_input,
+                                  outputs=[lai_output, agb_output, ph_output, lcc_output])
+
+    return model
+
+
+# 创建模型
+model = create_model(input_shape=(14,))
+
+# 编译模型
+model.compile(optimizer='adam', loss='mean_squared_error')
+
+# 训练模型
+model.fit(train_features, [train_labels[:, 0], train_labels[:, 1], train_labels[:, 2], train_labels[:, 3]],
+          epochs=50, batch_size=8, verbose=1)
+
+# 评估模型
+test_loss = model.evaluate(test_features, [test_labels[:, 0], test_labels[:, 1], test_labels[:, 2], test_labels[:, 3]],
+                           verbose=1)
+print('Test loss:', test_loss)
